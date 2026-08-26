@@ -1,97 +1,170 @@
-"""Run one backend or the recruiting comparison suite."""
+"""Job expansion, skip-with-reason, and suite runner."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
 
-from gpu_bench.backends import BACKENDS
-from gpu_bench.config import BenchConfig
-from gpu_bench.metrics import RunResult, skipped_result
+from gpu_bench.backends import REGISTRY, get_backend
+from gpu_bench.config import RunConfig
+from gpu_bench.metrics import RunResult
 
-FULL_BACKENDS = ("pytorch", "onnx", "tensorrt")
-FULL_PRECISIONS = ("fp32", "fp16", "bf16")
+DEFAULT_BACKENDS = ("pytorch", "onnx", "tensorrt")
+DEFAULT_PRECISIONS = ("fp32", "fp16")
 FULL_BATCHES = (1, 8, 16, 32)
-GRAPH_BATCHES = (1, 8)
+FULL_GRAPH_BATCHES = (1, 8)
 
 
-def available_backends() -> dict[str, tuple[bool, str]]:
-    return {name: backend.available() for name, backend in BACKENDS.items()}
+@dataclass
+class Skip:
+    backend: str
+    precision: str
+    batch_size: int
+    graph: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "backend": self.backend,
+            "precision": self.precision,
+            "batch_size": self.batch_size,
+            "graph": self.graph,
+            "reason": self.reason,
+        }
 
 
-def run_one(backend_name: str, cfg: BenchConfig) -> RunResult:
-    backend = BACKENDS.get(backend_name)
-    if backend is None:
-        return skipped_result(
-            backend=backend_name,
-            precision=cfg.precision,
-            batch_size=cfg.batch_size,
-            graph=cfg.graph,
-            reason=f"unknown backend {backend_name}",
-        )
-    return backend.run(cfg)
+@dataclass
+class SuiteResult:
+    results: list[RunResult]
+    skips: list[Skip]
 
 
-def run_suite(
-    *,
-    backends: Sequence[str] | None = None,
-    precisions: Sequence[str] | None = None,
-    batches: Sequence[int] | None = None,
-    graphs: bool = False,
-    suite: str = "default",
-    base: BenchConfig,
-) -> list[RunResult]:
-    backends = tuple(backends or ("pytorch",))
-    precisions = tuple(precisions or ("fp32",))
-    batches = tuple(batches or (base.batch_size,))
-    results: list[RunResult] = []
-
-    if suite == "full":
-        backends = FULL_BACKENDS
-        precisions = FULL_PRECISIONS
-        batches = FULL_BATCHES
-        jobs = _full_jobs(base)
+def parse_csv(value: str | Iterable[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = value.split(",")
     else:
-        jobs = []
-        for name in backends:
-            for precision in precisions:
-                for batch in batches:
-                    jobs.append((name, precision, batch, graphs))
-
-    for name, precision, batch, graph in jobs:
-        cfg = BenchConfig(
-            model=base.model,
-            precision=precision,
-            batch_size=batch,
-            warmup=base.warmup,
-            iters=base.iters,
-            graph=graph,
-            include_transfer=base.include_transfer,
-            pinned=base.pinned,
-            pretrained=base.pretrained,
-            artifacts_dir=base.artifacts_dir,
-            require_cuda_events=base.require_cuda_events,
-            input_size=base.input_size,
-            workspace_bytes=base.workspace_bytes,
-            seed=base.seed,
-            use_nondefault_stream=base.use_nondefault_stream,
-        )
-        results.append(run_one(name, cfg))
-    return results
+        parts = []
+        for item in value:
+            parts.extend(str(item).split(","))
+    return [p.strip() for p in parts if p.strip()]
 
 
-def _full_jobs(base: BenchConfig) -> list[tuple[str, str, int, bool]]:
-    """PyTorch FP32→FP16→BF16 → ORT → TRT FP32→FP16→BF16 → batching → CUDA Graphs."""
-    jobs: list[tuple[str, str, int, bool]] = []
-    for name in FULL_BACKENDS:
-        for precision in FULL_PRECISIONS:
-            for batch in FULL_BATCHES:
-                jobs.append((name, precision, batch, False))
-    for name in ("pytorch", "tensorrt"):
-        for precision in FULL_PRECISIONS:
-            for batch in GRAPH_BATCHES:
-                jobs.append((name, precision, batch, True))
+def expand_jobs(
+    *,
+    backends: list[str] | None,
+    precisions: list[str] | None,
+    batches: list[int] | None,
+    graph: bool,
+    suite: str | None,
+    warmup: int,
+    iters: int,
+    include_transfer: bool,
+    pinned: bool,
+    model: str,
+    require_cuda_events: bool,
+    artifacts_dir: Path,
+) -> list[RunConfig]:
+    """Build the list of RunConfig jobs.
+
+    Default: all requested/available backends, fp32+fp16, batch 1, no graph.
+    --suite full: pytorch/onnx/tensorrt, fp32/fp16, batches 1/8/16/32, and
+    CUDA Graphs at batch 1 and 8 for pytorch and tensorrt (in addition to eager).
+    """
+    if suite == "full":
+        names = list(DEFAULT_BACKENDS)
+        precs = list(DEFAULT_PRECISIONS)
+        batch_list = list(FULL_BATCHES)
+        jobs: list[RunConfig] = []
+        for name in names:
+            for prec in precs:
+                for batch in batch_list:
+                    jobs.append(
+                        _cfg(
+                            name, prec, batch, False, warmup, iters,
+                            include_transfer, pinned, model,
+                            require_cuda_events, artifacts_dir,
+                        )
+                    )
+                for batch in FULL_GRAPH_BATCHES:
+                    if name in {"pytorch", "tensorrt"}:
+                        jobs.append(
+                            _cfg(
+                                name, prec, batch, True, warmup, iters,
+                                include_transfer, pinned, model,
+                                require_cuda_events, artifacts_dir,
+                            )
+                        )
+        return jobs
+
+    names = backends or list(DEFAULT_BACKENDS)
+    precs = precisions or list(DEFAULT_PRECISIONS)
+    batch_list = batches or [1]
+    jobs = []
+    for name in names:
+        for prec in precs:
+            for batch in batch_list:
+                jobs.append(
+                    _cfg(
+                        name, prec, batch, graph, warmup, iters,
+                        include_transfer, pinned, model,
+                        require_cuda_events, artifacts_dir,
+                    )
+                )
     return jobs
 
 
-def describe_jobs(jobs: Iterable[tuple[str, str, int, bool]]) -> list[str]:
-    return [f"{n} {p} batch={b} graph={g}" for n, p, b, g in jobs]
+def _cfg(
+    backend: str,
+    precision: str,
+    batch_size: int,
+    graph: bool,
+    warmup: int,
+    iters: int,
+    include_transfer: bool,
+    pinned: bool,
+    model: str,
+    require_cuda_events: bool,
+    artifacts_dir: Path,
+) -> RunConfig:
+    return RunConfig(
+        backend=backend,
+        precision=precision,
+        batch_size=batch_size,
+        n_warmup=warmup,
+        n_iter=iters,
+        graph=graph,
+        include_transfer=include_transfer,
+        pinned=pinned,
+        model=model,
+        require_cuda_events=require_cuda_events,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def run_suite(jobs: list[RunConfig]) -> SuiteResult:
+    results: list[RunResult] = []
+    skips: list[Skip] = []
+    for cfg in jobs:
+        backend = get_backend(cfg.backend)
+        if backend is None:
+            skips.append(
+                Skip(cfg.backend, cfg.precision, cfg.batch_size, cfg.graph,
+                     f"unknown backend {cfg.backend!r}; known: {sorted(REGISTRY)}")
+            )
+            continue
+        if not backend.available():
+            skips.append(
+                Skip(cfg.backend, cfg.precision, cfg.batch_size, cfg.graph,
+                     backend.unavailable_reason() or f"{cfg.backend} unavailable")
+            )
+            continue
+        try:
+            results.append(backend.run(cfg))
+        except Exception as exc:  # noqa: BLE001
+            skips.append(
+                Skip(cfg.backend, cfg.precision, cfg.batch_size, cfg.graph, str(exc))
+            )
+    return SuiteResult(results=results, skips=skips)
