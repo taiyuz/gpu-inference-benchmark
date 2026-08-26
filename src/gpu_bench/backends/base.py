@@ -1,31 +1,29 @@
-"""Backend protocol and in-process registry."""
+"""Backend protocol and skip helpers."""
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
-from gpu_bench.config import RunConfig
-from gpu_bench.metrics import RunResult
+from gpu_bench.config import BenchConfig
+from gpu_bench.metrics import RunResult, skipped_result
 
 
-@runtime_checkable
 class Backend(Protocol):
     name: str
 
-    def available(self) -> bool: ...
+    def available(self) -> tuple[bool, str]: ...
 
-    def unavailable_reason(self) -> str: ...
-
-    def run(self, cfg: RunConfig) -> RunResult: ...
+    def run(self, cfg: BenchConfig) -> RunResult: ...
 
 
-REGISTRY: dict[str, Backend] = {}
-
-
-def register(backend: Backend) -> Backend:
-    REGISTRY[backend.name] = backend
-    return backend
-
-
-def get_backend(name: str) -> Backend | None:
-    return REGISTRY.get(name)
+def skip_if_unavailable(backend: Backend, cfg: BenchConfig) -> RunResult | None:
+    ok, reason = backend.available()
+    if ok:
+        return None
+    return skipped_result(
+        backend=backend.name,
+        precision=cfg.precision,
+        batch_size=cfg.batch_size,
+        graph=cfg.graph,
+        reason=reason,
+    )

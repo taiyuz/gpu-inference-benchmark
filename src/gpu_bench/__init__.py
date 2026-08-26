@@ -1,4 +1,4 @@
-"""GPU inference benchmark: PyTorch, ONNX Runtime, and TensorRT 10."""
+"""GPU inference benchmark harness: PyTorch, ONNX Runtime, TensorRT."""
 
 from gpu_bench.metrics import RunResult
 

@@ -1,14 +1,8 @@
-"""Latency percentiles, throughput, and GPU memory accounting.
-
-Throughput is batch_size / (mean_ms / 1000). GPU memory is taken from
-torch.cuda.max_memory_allocated() when CUDA is present; otherwise None.
-Values are never fabricated.
-"""
+"""Latency percentiles, throughput, and GPU memory accounting."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -30,41 +24,49 @@ class RunResult:
     throughput_ips: float
     gpu_mem_bytes: int | None
     timing_backend: str
-    notes: str
+    notes: str = ""
+    skipped: bool = False
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def percentile(latencies_ms: Sequence[float], q: float) -> float:
-    arr = np.asarray(latencies_ms, dtype=np.float64)
-    if arr.size == 0:
+def percentiles(latencies_ms: list[float]) -> tuple[float, float, float, float]:
+    if not latencies_ms:
         raise ValueError("latencies_ms is empty")
-    return float(np.percentile(arr, q))
-
-
-def mean_ms(latencies_ms: Sequence[float]) -> float:
     arr = np.asarray(latencies_ms, dtype=np.float64)
-    if arr.size == 0:
-        raise ValueError("latencies_ms is empty")
-    return float(arr.mean())
+    mean = float(arr.mean())
+    p50, p90, p99 = (float(x) for x in np.percentile(arr, [50, 90, 99]))
+    return mean, p50, p90, p99
 
 
-def throughput_ips(batch_size: int, mean_latency_ms: float) -> float:
-    if mean_latency_ms <= 0:
-        raise ValueError("mean_latency_ms must be > 0")
-    return float(batch_size) / (mean_latency_ms / 1000.0)
+def throughput_ips(batch_size: int, mean_ms: float) -> float:
+    if mean_ms <= 0:
+        raise ValueError("mean_ms must be > 0")
+    return batch_size / (mean_ms / 1000.0)
 
 
-def gpu_mem_bytes() -> int | None:
-    """Peak allocated bytes on the current CUDA device, or None without CUDA."""
+def gpu_peak_bytes() -> int | None:
     try:
         import torch
-    except ImportError:
+
+        if torch.cuda.is_available():
+            return int(torch.cuda.max_memory_allocated())
+    except Exception:
         return None
-    if not torch.cuda.is_available():
-        return None
-    return int(torch.cuda.max_memory_allocated())
+    return None
+
+
+def reset_gpu_peak() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.empty_cache()
+    except Exception:
+        return
 
 
 def summarize(
@@ -74,28 +76,56 @@ def summarize(
     batch_size: int,
     graph: bool,
     n_warmup: int,
-    n_iter: int,
-    latencies_ms: Sequence[float],
+    latencies_ms: list[float],
     timing_backend: str,
-    notes: str,
-    gpu_mem: int | None = None,
+    notes: str = "",
+    gpu_mem_bytes: int | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> RunResult:
-    samples = [float(x) for x in latencies_ms]
-    mean = mean_ms(samples)
+    mean_ms, p50_ms, p90_ms, p99_ms = percentiles(latencies_ms)
     return RunResult(
         backend=backend,
         precision=precision,
         batch_size=batch_size,
         graph=graph,
         n_warmup=n_warmup,
-        n_iter=n_iter,
-        latencies_ms=samples,
-        mean_ms=mean,
-        p50_ms=percentile(samples, 50.0),
-        p90_ms=percentile(samples, 90.0),
-        p99_ms=percentile(samples, 99.0),
-        throughput_ips=throughput_ips(batch_size, mean),
-        gpu_mem_bytes=gpu_mem if gpu_mem is not None else gpu_mem_bytes(),
+        n_iter=len(latencies_ms),
+        latencies_ms=list(latencies_ms),
+        mean_ms=mean_ms,
+        p50_ms=p50_ms,
+        p90_ms=p90_ms,
+        p99_ms=p99_ms,
+        throughput_ips=throughput_ips(batch_size, mean_ms),
+        gpu_mem_bytes=gpu_mem_bytes if gpu_mem_bytes is not None else gpu_peak_bytes(),
         timing_backend=timing_backend,
         notes=notes,
+        extra=extra or {},
+    )
+
+
+def skipped_result(
+    *,
+    backend: str,
+    precision: str,
+    batch_size: int,
+    graph: bool,
+    reason: str,
+) -> RunResult:
+    return RunResult(
+        backend=backend,
+        precision=precision,
+        batch_size=batch_size,
+        graph=graph,
+        n_warmup=0,
+        n_iter=0,
+        latencies_ms=[],
+        mean_ms=float("nan"),
+        p50_ms=float("nan"),
+        p90_ms=float("nan"),
+        p99_ms=float("nan"),
+        throughput_ips=float("nan"),
+        gpu_mem_bytes=None,
+        timing_backend="none",
+        notes=reason,
+        skipped=True,
     )

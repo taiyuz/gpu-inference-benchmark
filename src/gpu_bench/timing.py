@@ -1,83 +1,90 @@
-"""CUDA event and wall-clock timers.
-
-CUDA events measure device-side elapsed time. Wall-clock is a labeled fallback
-only and is NOT a CUDA event.
-"""
+"""GPU timing. CUDA events are the source of truth; wall clock is a labeled fallback."""
 
 from __future__ import annotations
 
 import time
-from typing import Protocol, runtime_checkable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 
-@runtime_checkable
-class Timer(Protocol):
+@dataclass(frozen=True)
+class TimingBackend:
     name: str
     notes: str
 
-    def start(self) -> None: ...
 
-    def stop(self) -> float:
-        """Elapsed milliseconds since start()."""
-        ...
+class Timer(Protocol):
+    @property
+    def backend(self) -> TimingBackend: ...
+
+    def measure(self, fn: Callable[[], Any]) -> float: ...
+
+
+def cuda_is_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
 
 
 class CudaEventTimer:
-    """GPU elapsed time via torch.cuda.Event(enable_timing=True)."""
-
-    name = "cuda_events"
-    notes = "CUDA event timing (device-side Event.elapsed_time). Not wall-clock."
+    """``torch.cuda.Event.elapsed_time`` in milliseconds (GPU-side)."""
 
     def __init__(self) -> None:
         import torch
 
         if not torch.cuda.is_available():
-            raise RuntimeError("CudaEventTimer requires a CUDA device")
+            raise RuntimeError("CUDA not available; cannot use CUDA event timing")
+        self._torch = torch
         self._start = torch.cuda.Event(enable_timing=True)
         self._end = torch.cuda.Event(enable_timing=True)
 
-    def start(self) -> None:
-        self._start.record()
+    @property
+    def backend(self) -> TimingBackend:
+        return TimingBackend(
+            name="cuda_event",
+            notes="torch.cuda.Event.elapsed_time (GPU-side, ms)",
+        )
 
-    def stop(self) -> float:
+    def measure(self, fn: Callable[[], Any]) -> float:
+        torch = self._torch
+        torch.cuda.synchronize()
+        self._start.record()
+        fn()
         self._end.record()
         self._end.synchronize()
         return float(self._start.elapsed_time(self._end))
 
 
 class WallClockTimer:
-    """Host perf_counter timer. This is NOT a CUDA event."""
+    """Host ``perf_counter`` fallback. Not a substitute for CUDA events."""
 
-    name = "wall_clock"
-    notes = "Wall-clock timing via time.perf_counter. This is NOT a CUDA event."
+    @property
+    def backend(self) -> TimingBackend:
+        return TimingBackend(
+            name="wall_clock",
+            notes=(
+                "time.perf_counter fallback — NOT a CUDA event. "
+                "Do not treat as GPU kernel time."
+            ),
+        )
 
-    def __init__(self) -> None:
-        self._t0 = 0.0
-
-    def start(self) -> None:
-        self._t0 = time.perf_counter()
-
-    def stop(self) -> float:
-        return (time.perf_counter() - self._t0) * 1000.0
-
-
-def _cuda_available() -> bool:
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except ImportError:
-        return False
+    def measure(self, fn: Callable[[], Any]) -> float:
+        t0 = time.perf_counter()
+        fn()
+        t1 = time.perf_counter()
+        return (t1 - t0) * 1000.0
 
 
 def make_timer(*, require_cuda_events: bool = False) -> Timer:
-    """Return a CUDA event timer when CUDA is available, else wall-clock.
-
-    If require_cuda_events is True and CUDA is missing, raise RuntimeError.
-    """
-    cuda_ok = _cuda_available()
-    if require_cuda_events and not cuda_ok:
-        raise RuntimeError("CUDA event timing required but CUDA is not available")
-    if cuda_ok:
+    if cuda_is_available():
         return CudaEventTimer()
+    if require_cuda_events:
+        raise RuntimeError(
+            "CUDA events required but no NVIDIA GPU/CUDA runtime is visible. "
+            "Run on a CUDA machine or drop --require-cuda-events."
+        )
     return WallClockTimer()

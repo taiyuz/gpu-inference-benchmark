@@ -1,44 +1,43 @@
-"""Model constructors. pretrained defaults to False so CPU/CI never downloads."""
+"""Model factories. Default ResNet-50; TinyConv for CPU/CI."""
 
 from __future__ import annotations
 
 from typing import Any
 
-
-def output_features(model_name: str) -> int:
-    if model_name == "tiny":
-        return 10
-    if model_name == "resnet50":
-        return 1000
-    raise ValueError(f"unsupported model: {model_name}")
+from gpu_bench.config import BenchConfig
 
 
-def _maybe_half(model: Any, device: Any, precision: str) -> Any:
+def _torch():
     import torch
+    import torch.nn as nn
 
-    dev = torch.device(device)
-    model = model.to(dev)
+    return torch, nn
+
+
+def resolve_device():
+    torch, _ = _torch()
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def resolve_dtype(precision: str, device) -> Any:
+    torch, _ = _torch()
+    if precision in {"fp16", "bf16"} and device.type != "cuda":
+        raise RuntimeError(f"{precision} is only supported on CUDA in this harness")
     if precision == "fp16":
-        if dev.type != "cuda":
-            raise RuntimeError("FP16 (.half()) is only supported on CUDA")
-        model = model.half()
-    return model
+        return torch.float16
+    if precision == "bf16":
+        return torch.bfloat16
+    return torch.float32
 
 
-_TINY_CONV_CLS: Any = None
+class TinyConv:
+    """Placeholder so tests can import the name; actual module is built below."""
 
 
-def _tiny_conv_class() -> Any:
-    """Build (and cache) TinyConv without importing torch at module load."""
-    global _TINY_CONV_CLS
-    if _TINY_CONV_CLS is not None:
-        return _TINY_CONV_CLS
-    import torch
-    from torch import nn
+def build_tiny(num_classes: int = 10):
+    torch, nn = _torch()
 
-    class TinyConv(nn.Module):
-        """2 conv + pool + linear. 3x224x224 in, 10-class out. CPU test dummy."""
-
+    class _TinyConv(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.features = nn.Sequential(
@@ -46,53 +45,56 @@ def _tiny_conv_class() -> Any:
                 nn.ReLU(inplace=True),
                 nn.Conv2d(16, 32, kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
-                nn.AdaptiveAvgPool2d(1),
+                nn.AdaptiveAvgPool2d((1, 1)),
             )
-            self.classifier = nn.Linear(32, 10)
+            self.classifier = nn.Linear(32, num_classes)
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x):  # type: ignore[no-untyped-def]
             x = self.features(x)
             x = torch.flatten(x, 1)
             return self.classifier(x)
 
-    _TINY_CONV_CLS = TinyConv
-    return TinyConv
+    return _TinyConv()
 
 
-def __getattr__(name: str) -> Any:
-    if name == "TinyConv":
-        return _tiny_conv_class()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def tiny_conv(device: Any, precision: str) -> Any:
-    """2 conv + pool + linear. 3x224x224 in, 10-class out. CPU test dummy."""
-    TinyConv = _tiny_conv_class()
-    model = TinyConv()
-    model.eval()
-    return _maybe_half(model, device, precision)
-
-
-def resnet50(device: Any, precision: str, pretrained: bool = False) -> Any:
-    """torchvision ResNet-50. pretrained=False avoids a network fetch on CPU/CI."""
-    from torchvision.models import ResNet50_Weights
-    from torchvision.models import resnet50 as _resnet50
+def build_resnet50(*, pretrained: bool = False):
+    from torchvision.models import ResNet50_Weights, resnet50
 
     weights = ResNet50_Weights.DEFAULT if pretrained else None
-    model = _resnet50(weights=weights)
+    return resnet50(weights=weights)
+
+
+def load_model(cfg: BenchConfig, device=None, dtype=None):
+    torch, _ = _torch()
+    device = device or resolve_device()
+    if dtype is None:
+        dtype = torch.float32 if cfg.precision == "fp32" else resolve_dtype(cfg.precision, device)
+
+    if cfg.model == "tiny":
+        model = build_tiny()
+    else:
+        model = build_resnet50(pretrained=cfg.pretrained)
+
+    model = model.to(device=device, dtype=dtype)
     model.eval()
-    return _maybe_half(model, device, precision)
+    return model
 
 
-def build_model(
-    name: str,
-    device: Any,
-    precision: str,
-    *,
-    pretrained: bool = False,
-) -> Any:
-    if name == "tiny":
-        return tiny_conv(device, precision)
-    if name == "resnet50":
-        return resnet50(device, precision, pretrained=pretrained)
-    raise ValueError(f"unsupported model: {name}")
+def random_input(cfg: BenchConfig, device=None, dtype=None, *, pinned: bool | None = None):
+    torch, _ = _torch()
+    device = device or resolve_device()
+    if dtype is None:
+        dtype = torch.float32 if device.type != "cuda" or cfg.precision == "fp32" else resolve_dtype(cfg.precision, device)
+    pin = cfg.pinned if pinned is None else pinned
+    host = torch.randn(
+        cfg.batch_size,
+        3,
+        cfg.input_size,
+        cfg.input_size,
+        dtype=dtype if device.type == "cpu" else torch.float32,
+    )
+    if pin and device.type == "cuda":
+        host = host.pin_memory()
+    if device.type == "cuda":
+        return host.to(device=device, dtype=dtype, non_blocking=True)
+    return host.to(device=device)
