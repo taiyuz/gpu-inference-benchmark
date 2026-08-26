@@ -1,12 +1,10 @@
-"""Shared fixtures. Artifacts land under tmp_path so tests never touch repo artifacts/."""
-
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from gpu_bench.config import RunConfig
+from gpu_bench.config import BenchConfig
 
 
 @pytest.fixture
@@ -17,14 +15,13 @@ def artifacts_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tiny_cpu_cfg(artifacts_dir: Path) -> RunConfig:
-    return RunConfig(
-        backend="pytorch",
+def tiny_cpu_cfg(artifacts_dir: Path) -> BenchConfig:
+    return BenchConfig(
+        model="tiny",
         precision="fp32",
         batch_size=1,
-        n_warmup=1,
-        n_iter=3,
+        warmup=1,
+        iters=3,
         graph=False,
-        model="tiny",
         artifacts_dir=artifacts_dir,
     )

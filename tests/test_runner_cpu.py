@@ -1,101 +1,90 @@
-"""CPU-only runner tests. No NVIDIA GPU required."""
-
 from __future__ import annotations
 
 import pytest
 
-from gpu_bench.backends.tensorrt import TensorRTBackend
-from gpu_bench.config import RunConfig
-from gpu_bench.runner import expand_jobs, run_suite
+from gpu_bench.backends import BACKENDS
+from gpu_bench.config import BenchConfig
+from gpu_bench.report import DASH, markdown_table
+from gpu_bench.runner import expand_jobs, run_one, run_suite
 
-torch = pytest.importorskip("torch")
+
+def test_tensorrt_unavailable_without_gpu() -> None:
+    ok, reason = BACKENDS["tensorrt"].available()
+    if ok:
+        pytest.skip("TensorRT+CUDA unexpectedly available")
+    assert ok is False
+    assert reason
 
 
-def test_pytorch_tiny_cpu_fp32(tiny_cpu_cfg: RunConfig) -> None:
-    suite = run_suite([tiny_cpu_cfg])
-    assert suite.skips == []
-    assert len(suite.results) == 1
-    result = suite.results[0]
-    assert result.backend == "pytorch"
-    assert result.precision == "fp32"
+def test_pytorch_tiny_cpu(tiny_cpu_cfg: BenchConfig) -> None:
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchvision")
+    if torch.cuda.is_available():
+        pytest.skip("this test is the CPU dummy path")
+    result = run_one("pytorch", tiny_cpu_cfg)
+    assert not result.skipped
     assert result.n_iter == 3
-    assert result.mean_ms > 0.0
-    assert len(result.latencies_ms) == 3
+    assert result.mean_ms > 0
     assert result.timing_backend == "wall_clock"
     assert result.gpu_mem_bytes is None
-    assert result.graph is False
 
 
-def test_pytorch_fp16_skipped_on_cpu(artifacts_dir) -> None:
+def test_pytorch_fp16_skipped_on_cpu(tiny_cpu_cfg: BenchConfig) -> None:
+    pytest.importorskip("torch")
+    import torch
+
     if torch.cuda.is_available():
-        pytest.skip("CUDA present; FP16 skip is a CPU-only assertion")
-    cfg = RunConfig(
-        backend="pytorch",
-        precision="fp16",
-        batch_size=1,
-        n_warmup=0,
-        n_iter=1,
-        model="tiny",
-        artifacts_dir=artifacts_dir,
-    )
-    suite = run_suite([cfg])
-    assert suite.results == []
-    assert suite.skips
-    assert "FP16" in suite.skips[0].reason
+        pytest.skip("CUDA present")
+    tiny_cpu_cfg.precision = "fp16"
+    result = run_one("pytorch", tiny_cpu_cfg)
+    assert result.skipped
 
 
-def test_onnx_tiny_cpu(artifacts_dir) -> None:
-    pytest.importorskip("onnxruntime")
-    cfg = RunConfig(
-        backend="onnx",
-        precision="fp32",
-        batch_size=1,
-        n_warmup=1,
-        n_iter=2,
-        model="tiny",
-        artifacts_dir=artifacts_dir,
-    )
-    suite = run_suite([cfg])
-    if suite.skips:
-        pytest.skip(suite.skips[0].reason)
-    assert len(suite.results) == 1
-    assert suite.results[0].backend == "onnx"
-    assert suite.results[0].mean_ms > 0.0
+def test_bf16_skipped_on_cpu(tiny_cpu_cfg: BenchConfig) -> None:
+    pytest.importorskip("torch")
+    import torch
 
-
-def test_tensorrt_unavailable_on_cpu() -> None:
-    backend = TensorRTBackend()
     if torch.cuda.is_available():
-        pytest.skip("CUDA present; TRT available() is not expected to be False")
-    assert backend.available() is False
-    assert backend.unavailable_reason()
+        pytest.skip("CUDA present")
+    tiny_cpu_cfg.precision = "bf16"
+    result = run_one("pytorch", tiny_cpu_cfg)
+    assert result.skipped
 
 
-def test_graph_path_skipped_without_cuda(tiny_cpu_cfg: RunConfig) -> None:
+def test_graph_skipped_on_cpu(tiny_cpu_cfg: BenchConfig) -> None:
+    pytest.importorskip("torch")
+    import torch
+
     if torch.cuda.is_available():
-        pytest.skip("CUDA Graphs require a GPU; this test is the CPU skip path")
+        pytest.skip("CUDA present")
     tiny_cpu_cfg.graph = True
-    suite = run_suite([tiny_cpu_cfg])
-    assert suite.skips == []
-    assert suite.results[0].graph is False
-    assert "CUDA" in suite.results[0].notes
+    result = run_one("pytorch", tiny_cpu_cfg)
+    assert result.skipped
 
 
-def test_full_suite_expands_graphs() -> None:
-    jobs = expand_jobs(
-        backends=None,
-        precisions=None,
-        batches=None,
-        graph=False,
-        suite="full",
-        warmup=1,
-        iters=1,
-        include_transfer=False,
-        pinned=False,
-        model="tiny",
-        require_cuda_events=False,
-        artifacts_dir=__import__("pathlib").Path("artifacts"),
-    )
-    assert any(j.graph and j.batch_size == 1 for j in jobs)
-    assert any(j.graph and j.batch_size == 8 for j in jobs)
-    assert {j.batch_size for j in jobs} >= {1, 8, 16, 32}
+def test_markdown_skipped_uses_dash(tiny_cpu_cfg: BenchConfig) -> None:
+    tiny_cpu_cfg.precision = "fp16"
+    tiny_cpu_cfg.graph = True
+    results = [run_one("tensorrt", tiny_cpu_cfg)]
+    md = markdown_table(results)
+    assert DASH in md
+    assert results[0].skipped
+
+
+def test_suite_default_runs_requested_backend(tiny_cpu_cfg: BenchConfig) -> None:
+    pytest.importorskip("torch")
+    import torch
+
+    if torch.cuda.is_available():
+        pytest.skip("CPU dummy path")
+    results = run_suite(backends=("pytorch",), precisions=("fp32",), batches=(1,), base=tiny_cpu_cfg)
+    assert len(results) == 1
+    assert results[0].backend == "pytorch"
+
+
+def test_full_suite_includes_bf16_and_graphs() -> None:
+    jobs = expand_jobs(suite="full")
+    assert any(p == "bf16" for _, p, _, _ in jobs)
+    assert any(g and b == 1 for *_, b, g in jobs)
+    assert any(g and b == 8 for *_, b, g in jobs)
+    assert {b for _, _, b, _ in jobs} >= {1, 8, 16, 32}

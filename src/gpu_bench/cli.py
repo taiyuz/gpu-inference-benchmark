@@ -1,4 +1,4 @@
-"""gpu-bench command line interface."""
+"""gpu-bench CLI."""
 
 from __future__ import annotations
 
@@ -6,100 +6,81 @@ import argparse
 import sys
 from pathlib import Path
 
-from gpu_bench.report import write_json, write_markdown
-from gpu_bench.runner import expand_jobs, parse_csv, run_suite
+from gpu_bench.config import BenchConfig
+from gpu_bench.report import markdown_table, write_json, write_markdown
+from gpu_bench.runner import available_backends, run_suite
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gpu-bench",
-        description="Compare PyTorch, ONNX Runtime, and TensorRT 10 inference runtimes.",
+        description="Compare PyTorch, ONNX Runtime, and TensorRT 10 inference on ResNet-50.",
     )
-    p.add_argument(
-        "--backends",
-        action="append",
-        default=None,
-        help="Comma-separated or repeatable: pytorch,onnx,tensorrt. Default: all available.",
-    )
-    p.add_argument(
-        "--precision",
-        default="fp32,fp16",
-        help="Comma-separated precisions (default: fp32,fp16).",
-    )
-    p.add_argument(
-        "--batch",
-        default="1",
-        help="Comma-separated batch sizes (default: 1).",
-    )
+    p.add_argument("--backends", default="pytorch", help="comma list: pytorch,onnx,tensorrt")
+    p.add_argument("--precision", default="fp32", help="comma list: fp32,fp16,bf16")
+    p.add_argument("--batch", default="1", help="comma list of batch sizes")
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--iters", type=int, default=100)
-    p.add_argument("--graph", action="store_true", help="Capture CUDA Graphs when supported.")
+    p.add_argument("--graph", action="store_true", help="CUDA Graphs on pytorch/tensorrt")
+    p.add_argument("--include-transfer", action="store_true", help="time H2D+compute+D2H")
+    p.add_argument("--no-pinned", action="store_true")
+    p.add_argument("--model", choices=("resnet50", "tiny"), default="resnet50")
+    p.add_argument("--pretrained", action="store_true")
+    p.add_argument("--suite", choices=("default", "full"), default="default")
+    p.add_argument("--out", type=Path, default=None, help="JSON report path")
+    p.add_argument("--md", type=Path, default=None, help="Markdown report path")
+    p.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"))
+    p.add_argument("--require-cuda-events", action="store_true")
     p.add_argument(
-        "--include-transfer",
+        "--default-stream",
         action="store_true",
-        help="Time H2D + compute + D2H instead of compute-only after the input is on device.",
+        help="use the CUDA default stream (graph capture needs a non-default stream)",
     )
-    p.add_argument(
-        "--pinned",
-        action="store_true",
-        help="Pin host memory for H2D copies.",
-    )
-    p.add_argument("--model", choices=["resnet50", "tiny"], default="resnet50")
-    p.add_argument("--out", default="report.json", help="JSON report path.")
-    p.add_argument("--md", default="report.md", help="Markdown report path.")
-    p.add_argument(
-        "--require-cuda-events",
-        action="store_true",
-        help="Fail if CUDA event timing is unavailable (do not fall back to wall-clock).",
-    )
-    p.add_argument("--artifacts-dir", default="artifacts")
-    p.add_argument(
-        "--suite",
-        choices=["full"],
-        default=None,
-        help="Recruiting comparison: pytorch/onnx/tensorrt, fp32/fp16, "
-        "batches 1/8/16/32, graphs at batch 1 and 8.",
-    )
+    p.add_argument("--list", action="store_true", help="print backend availability and exit")
     return p
+
+
+def _csv(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    backends = parse_csv(args.backends) or None
-    precisions = parse_csv(args.precision)
-    batches = [int(x) for x in parse_csv(args.batch)]
-    jobs = expand_jobs(
-        backends=backends,
-        precisions=precisions,
-        batches=batches,
-        graph=bool(args.graph),
-        suite=args.suite,
+    if args.list:
+        for name, (ok, reason) in available_backends().items():
+            status = "ready" if ok else f"skip ({reason})"
+            print(f"{name:10} {status}")
+        return 0
+
+    cfg = BenchConfig(
+        model=args.model,
+        precision=_csv(args.precision)[0],
+        batch_size=int(_csv(args.batch)[0]),
         warmup=args.warmup,
         iters=args.iters,
-        include_transfer=bool(args.include_transfer),
-        pinned=bool(args.pinned),
-        model=args.model,
-        require_cuda_events=bool(args.require_cuda_events),
-        artifacts_dir=Path(args.artifacts_dir),
+        graph=args.graph,
+        include_transfer=args.include_transfer,
+        pinned=not args.no_pinned,
+        pretrained=args.pretrained,
+        artifacts_dir=args.artifacts_dir,
+        require_cuda_events=args.require_cuda_events,
+        use_nondefault_stream=not args.default_stream,
     )
-    suite = run_suite(jobs)
-    for skip in suite.skips:
-        graph = "graph" if skip.graph else "eager"
-        print(
-            f"skip {skip.backend} {skip.precision} batch={skip.batch_size} "
-            f"({graph}): {skip.reason}",
-            file=sys.stderr,
-        )
-    for result in suite.results:
-        print(
-            f"{result.backend} {result.precision} batch={result.batch_size} "
-            f"graph={result.graph} timing={result.timing_backend} "
-            f"mean_ms={result.mean_ms:.3f} p99_ms={result.p99_ms:.3f} "
-            f"ips={result.throughput_ips:.1f} mem={result.gpu_mem_bytes}"
-        )
-    write_json(Path(args.out), suite.results, suite.skips)
-    write_markdown(Path(args.md), suite.results, suite.skips)
-    print(f"wrote {args.out} and {args.md}")
+    results = run_suite(
+        backends=_csv(args.backends),
+        precisions=_csv(args.precision),
+        batches=[int(x) for x in _csv(args.batch)],
+        graphs=args.graph,
+        suite=args.suite,
+        base=cfg,
+    )
+    print(markdown_table(results))
+    if args.out:
+        write_json(args.out, results)
+        print(f"wrote {args.out}", file=sys.stderr)
+    if args.md:
+        write_markdown(args.md, results)
+        print(f"wrote {args.md}", file=sys.stderr)
     return 0
 
 
