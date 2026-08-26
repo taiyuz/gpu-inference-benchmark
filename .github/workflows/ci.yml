@@ -1,0 +1,17 @@
+name: cpu-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Install CPU extras
+        run: uv sync --extra dev --extra torch --extra onnx
+      - name: Test
+        run: uv run pytest

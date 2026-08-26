@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gpu-bench"
+version = "0.1.0"
+description = "GPU inference harness: PyTorch vs ONNX Runtime vs TensorRT 10 (ResNet-50)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Taiyu Zhu" }]
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+torch = ["torch>=2.4", "torchvision>=0.19"]
+onnx = ["onnx>=1.16", "onnxruntime>=1.18"]
+cuda = ["onnxruntime-gpu>=1.18"]
+tensorrt = ["tensorrt>=10.0"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+gpu-bench = "gpu_bench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gpu_bench"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
