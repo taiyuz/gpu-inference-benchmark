@@ -1,214 +1,190 @@
-"""TensorRT 10 Python API backend (NOT TRT 8 bindings / execute_async_v2)."""
+"""TensorRT 10 backend: named I/O tensors and execute_async_v3.
+
+TRT 8 used binding indices + execute_async_v2. TRT 10 dropped that path in
+favor of named tensors and execute_async_v3. This file is written against 10.x.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-from gpu_bench.config import RunConfig
+from gpu_bench.config import BenchConfig
 from gpu_bench.export import export_onnx
-from gpu_bench.metrics import RunResult, summarize
+from gpu_bench.metrics import RunResult, reset_gpu_peak, skipped_result, summarize
 from gpu_bench.timing import make_timer
 
 
 class TensorRTBackend:
     name = "tensorrt"
 
-    def available(self) -> bool:
+    def available(self) -> tuple[bool, str]:
         try:
             import tensorrt as trt  # noqa: F401
-        except ImportError:
-            return False
+        except ImportError as exc:
+            return False, f"tensorrt not installed ({exc})"
         try:
             import torch
 
-            return bool(torch.cuda.is_available())
-        except ImportError:
-            return False
+            if not torch.cuda.is_available():
+                return False, "TensorRT backend requires CUDA"
+        except ImportError as exc:
+            return False, f"torch required for TRT buffers/timing ({exc})"
+        return True, ""
 
-    def unavailable_reason(self) -> str:
-        try:
-            import tensorrt as trt  # noqa: F401
-        except ImportError:
-            return "tensorrt is not installed (NGC image or pip/uv extra: tensorrt)"
-        try:
-            import torch
-        except ImportError:
-            return "torch is required to run the TensorRT backend"
-        if not torch.cuda.is_available():
-            return "TensorRT inference requires CUDA"
-        return ""
+    def run(self, cfg: BenchConfig) -> RunResult:
+        ok, reason = self.available()
+        if not ok:
+            return skipped_result(
+                backend=self.name,
+                precision=cfg.precision,
+                batch_size=cfg.batch_size,
+                graph=cfg.graph,
+                reason=reason,
+            )
 
-    def run(self, cfg: RunConfig) -> RunResult:
-        if not self.available():
-            raise RuntimeError(self.unavailable_reason() or "tensorrt unavailable")
+        import tensorrt as trt
         import torch
 
-        torch.cuda.reset_peak_memory_stats()
-        onnx_file = export_onnx(
-            model_name=cfg.model,
-            precision=cfg.precision,
-            batch_size=cfg.batch_size,
-            artifacts_dir=cfg.artifacts_dir,
-        )
-        engine_path = _engine_path(cfg.artifacts_dir, cfg.model, cfg.precision, cfg.batch_size)
-        engine = _load_or_build_engine(onnx_file, engine_path, cfg)
-
+        engine_path = _engine_path(cfg)
+        engine = _load_or_build_engine(cfg, engine_path)
+        context = engine.create_execution_context()
         timer = make_timer(require_cuda_events=cfg.require_cuda_events)
-        notes = [
-            timer.notes,
-            f"TensorRT 10 engine at {engine_path}.",
-            "I/O via named tensors + execute_async_v3 (not TRT 8 bindings[]).",
-        ]
-        latencies, used_graph, extra = _run_engine(engine, cfg, timer)
-        notes.extend(extra)
+        reset_gpu_peak()
 
-        mem = int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None
+        tensors = _allocate_io(engine, context, cfg)
+        # Non-default stream: CUDA Graph capture cannot use the default stream.
+        stream = torch.cuda.Stream() if cfg.use_nondefault_stream else torch.cuda.current_stream()
+        stream_handle = int(stream.cuda_stream)
+        notes = [
+            f"trt={getattr(trt, '__version__', 'unknown')}",
+            f"engine={engine_path.name}",
+            "execute_async_v3 + named I/O tensors (TRT 10; implicit batch removed)",
+            "non-default CUDA stream" if cfg.use_nondefault_stream else "default stream",
+        ]
+
+        def enqueue() -> None:
+            ok_exec = context.execute_async_v3(stream_handle)
+            if not ok_exec:
+                raise RuntimeError("TensorRT execute_async_v3 failed")
+
+        graph = None
+        if cfg.graph:
+            for _ in range(3):
+                enqueue()
+            stream.synchronize()
+            try:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    enqueue()
+                notes.append("CUDA Graph captured around execute_async_v3")
+            except Exception as exc:  # capture can fail on some TRT/runtime combos
+                graph = None
+                notes.append(f"CUDA Graph capture failed ({type(exc).__name__}: {exc}); using enqueue")
+
+        def step() -> None:
+            if graph is not None:
+                graph.replay()
+            else:
+                enqueue()
+
+        for _ in range(cfg.warmup):
+            step()
+        stream.synchronize()
+
+        latencies = [timer.measure(step) for _ in range(cfg.iters)]
+        _ = tensors
         return summarize(
             backend=self.name,
             precision=cfg.precision,
             batch_size=cfg.batch_size,
-            graph=used_graph,
-            n_warmup=cfg.n_warmup,
-            n_iter=cfg.n_iter,
+            graph=cfg.graph and graph is not None,
+            n_warmup=cfg.warmup,
             latencies_ms=latencies,
-            timing_backend=timer.name,
-            notes=" ".join(notes),
-            gpu_mem=mem,
+            timing_backend=timer.backend.name,
+            notes="; ".join(notes + [timer.backend.notes]),
+            extra={"engine": str(engine_path)},
         )
 
 
-def _engine_path(artifacts_dir: Path, model: str, precision: str, batch_size: int) -> Path:
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    return artifacts_dir / f"{model}_{precision}_b{batch_size}.engine"
+def _engine_path(cfg: BenchConfig) -> Path:
+    cfg.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return cfg.artifacts_dir / f"{cfg.model}_{cfg.precision}_b{cfg.batch_size}.engine"
 
 
-def _load_or_build_engine(onnx_file: Path, engine_path: Path, cfg: RunConfig) -> Any:
+def _load_or_build_engine(cfg: BenchConfig, path: Path):
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)
     runtime = trt.Runtime(logger)
-    if engine_path.exists():
-        serialized = engine_path.read_bytes()
-        engine = runtime.deserialize_cuda_engine(serialized)
-        if engine is not None:
-            return engine
+    if path.exists():
+        return runtime.deserialize_cuda_engine(path.read_bytes())
 
+    onnx_file = export_onnx(cfg)
     builder = trt.Builder(logger)
-    flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    network = builder.create_network(flag)
+    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(network_flags)
     parser = trt.OnnxParser(network, logger)
     onnx_bytes = onnx_file.read_bytes()
     if not parser.parse(onnx_bytes):
         errors = []
         for i in range(parser.num_errors):
             errors.append(str(parser.get_error(i)))
-        raise RuntimeError("TensorRT ONNX parse failed: " + "; ".join(errors))
+        raise RuntimeError("ONNX parse failed:\n" + "\n".join(errors))
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, cfg.workspace_bytes)
     if cfg.precision == "fp16":
+        if not builder.platform_has_fast_fp16:
+            raise RuntimeError("this GPU does not report fast FP16; refusing TRT FP16 build")
         config.set_flag(trt.BuilderFlag.FP16)
+    elif cfg.precision == "bf16":
+        if not hasattr(trt.BuilderFlag, "BF16"):
+            raise RuntimeError("this TensorRT build has no BuilderFlag.BF16")
+        config.set_flag(trt.BuilderFlag.BF16)
 
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError("TensorRT build_serialized_network returned None")
-    engine_path.write_bytes(bytes(serialized))
-    engine = runtime.deserialize_cuda_engine(serialized)
-    if engine is None:
-        raise RuntimeError("TensorRT failed to deserialize the built engine")
-    return engine
+    path.write_bytes(bytes(serialized))
+    return runtime.deserialize_cuda_engine(serialized)
 
 
-def _run_engine(engine: Any, cfg: RunConfig, timer: Any) -> tuple[list[float], bool, list[str]]:
+def _allocate_io(engine, context, cfg: BenchConfig) -> dict[str, object]:
     import tensorrt as trt
     import torch
 
-    notes: list[str] = []
-    context = engine.create_execution_context()
-    stream = torch.cuda.current_stream()
-    dtype = torch.float16 if cfg.precision == "fp16" else torch.float32
-
-    buffers: dict[str, torch.Tensor] = {}
-    input_name: str | None = None
-    output_names: list[str] = []
+    dtype_map = {
+        trt.float32: torch.float32,
+        trt.float16: torch.float16,
+        trt.int32: torch.int32,
+        trt.int8: torch.int8,
+        trt.bool: torch.bool,
+    }
+    if hasattr(trt, "bfloat16"):
+        dtype_map[trt.bfloat16] = torch.bfloat16
+    elif hasattr(trt, "bf16"):
+        dtype_map[trt.bf16] = torch.bfloat16
+    tensors: dict[str, object] = {}
     for i in range(engine.num_io_tensors):
         name = engine.get_tensor_name(i)
         mode = engine.get_tensor_mode(name)
-        shape = tuple(int(d) for d in engine.get_tensor_shape(name))
-        if any(d < 0 for d in shape):
-            if mode == trt.TensorIOMode.INPUT:
-                shape = (cfg.batch_size, 3, 224, 224)
-                context.set_input_shape(name, shape)
+        shape = tuple(engine.get_tensor_shape(name))
+        fixed = []
+        for dim_i, dim in enumerate(shape):
+            if dim == -1:
+                fixed.append(cfg.batch_size if dim_i == 0 else cfg.input_size)
             else:
-                shape = tuple(int(d) for d in context.get_tensor_shape(name))
-        tensor = torch.empty(shape, dtype=dtype, device="cuda")
-        buffers[name] = tensor
-        context.set_tensor_address(name, int(tensor.data_ptr()))
+                fixed.append(int(dim))
+        shape = tuple(fixed)
+        if -1 in tuple(engine.get_tensor_shape(name)):
+            context.set_input_shape(name, shape)
+        trt_dtype = engine.get_tensor_dtype(name)
+        torch_dtype = dtype_map.get(trt_dtype)
+        if torch_dtype is None:
+            raise RuntimeError(f"unsupported TRT dtype {trt_dtype} for {name}")
+        buf = torch.empty(shape, device="cuda", dtype=torch_dtype)
         if mode == trt.TensorIOMode.INPUT:
-            input_name = name
-        else:
-            output_names.append(name)
-
-    if input_name is None:
-        raise RuntimeError("TensorRT engine has no input tensor")
-
-    cpu_x = torch.randn_like(buffers[input_name], device="cpu")
-    if cfg.pinned:
-        cpu_x = cpu_x.pin_memory()
-    buffers[input_name].copy_(cpu_x)
-    torch.cuda.synchronize()
-
-    if cfg.include_transfer:
-        notes.append("Timed region includes H2D + execute_async_v3 + D2H.")
-    else:
-        notes.append("Timed region is execute_async_v3; input already on device.")
-
-    def infer() -> None:
-        if cfg.include_transfer:
-            buffers[input_name].copy_(cpu_x, non_blocking=bool(cfg.pinned))
-        ok = context.execute_async_v3(int(stream.cuda_stream))
-        if not ok:
-            raise RuntimeError("execute_async_v3 failed")
-        if cfg.include_transfer:
-            for n in output_names:
-                _ = buffers[n].to("cpu")
-
-    for _ in range(cfg.n_warmup):
-        infer()
-    torch.cuda.synchronize()
-
-    used_graph = False
-    replay = infer
-    if cfg.graph:
-        try:
-            graph = torch.cuda.CUDAGraph()
-            # Capture compute-only: copies stay outside the graph.
-            with torch.cuda.graph(graph, stream=stream):
-                ok = context.execute_async_v3(int(stream.cuda_stream))
-                if not ok:
-                    raise RuntimeError("execute_async_v3 failed during capture")
-
-            def replay_graph() -> None:
-                if cfg.include_transfer:
-                    buffers[input_name].copy_(cpu_x, non_blocking=bool(cfg.pinned))
-                graph.replay()
-                if cfg.include_transfer:
-                    for n in output_names:
-                        _ = buffers[n].to("cpu")
-
-            replay = replay_graph
-            used_graph = True
-            notes.append("CUDA Graph captured around execute_async_v3.")
-        except Exception as exc:  # noqa: BLE001
-            notes.append(
-                f"CUDA Graph capture skipped (dynamic shapes or TRT capture limits): {exc}."
-            )
-            replay = infer
-
-    latencies: list[float] = []
-    for _ in range(cfg.n_iter):
-        timer.start()
-        replay()
-        latencies.append(timer.stop())
-    return latencies, used_graph, notes
+            buf.normal_()
+        context.set_tensor_address(name, int(buf.data_ptr()))
+        tensors[name] = buf
+    return tensors

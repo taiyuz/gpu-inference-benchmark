@@ -1,7 +1,15 @@
-"""Inference backend registry. Backends register in a follow-up commit."""
+"""Inference backend registry."""
 
 from __future__ import annotations
 
-BACKENDS: dict = {}
+from gpu_bench.backends.onnxrt import OnnxRuntimeBackend
+from gpu_bench.backends.pytorch import PyTorchBackend
+from gpu_bench.backends.tensorrt import TensorRTBackend
 
-__all__ = ["BACKENDS"]
+BACKENDS = {
+    "pytorch": PyTorchBackend(),
+    "onnx": OnnxRuntimeBackend(),
+    "tensorrt": TensorRTBackend(),
+}
+
+__all__ = ["BACKENDS", "OnnxRuntimeBackend", "PyTorchBackend", "TensorRTBackend"]
