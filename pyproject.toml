@@ -9,7 +9,7 @@ description = "GPU inference runtime comparison: PyTorch, ONNX Runtime, and Tens
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "taiyuz" }]
+authors = [{ name = "Taiyu Zhu" }]
 dependencies = [
     "numpy>=1.26",
 ]
