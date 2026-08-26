@@ -5,19 +5,35 @@ build-backend = "hatchling.build"
 [project]
 name = "gpu-bench"
 version = "0.1.0"
-description = "GPU inference harness: PyTorch vs ONNX Runtime vs TensorRT 10 (ResNet-50)."
+description = "GPU inference runtime comparison: PyTorch, ONNX Runtime, and TensorRT 10"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Taiyu Zhu" }]
-dependencies = ["numpy>=1.26"]
+authors = [{ name = "taiyuz" }]
+dependencies = [
+    "numpy>=1.26",
+]
 
 [project.optional-dependencies]
-torch = ["torch>=2.4", "torchvision>=0.19"]
-onnx = ["onnx>=1.16", "onnxruntime>=1.18"]
-cuda = ["onnxruntime-gpu>=1.18"]
-tensorrt = ["tensorrt>=10.0"]
-dev = ["pytest>=8", "ruff>=0.6"]
+torch = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+]
+onnx = [
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+]
+cuda = [
+    "onnxruntime-gpu>=1.18",
+]
+tensorrt = [
+    # NGC images already ship TensorRT; this extra is for environments that need the pip wheel.
+    "tensorrt>=10.0",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
 
 [project.scripts]
 gpu-bench = "gpu_bench.cli:main"
@@ -30,11 +46,6 @@ packages = ["src/gpu_bench"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
