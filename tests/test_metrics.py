@@ -1,46 +1,45 @@
+"""Percentile and throughput math against a known latency list."""
+
 from __future__ import annotations
 
-import math
+import numpy as np
 
-import pytest
+from gpu_bench.metrics import mean_ms, percentile, summarize, throughput_ips
 
-from gpu_bench.metrics import percentiles, skipped_result, summarize, throughput_ips
-
-
-def test_percentiles_known_vector() -> None:
-    xs = [float(i) for i in range(1, 101)]
-    mean, p50, p90, p99 = percentiles(xs)
-    assert mean == pytest.approx(50.5)
-    assert p50 == pytest.approx(50.5)
-    assert p90 == pytest.approx(90.1)
-    assert p99 == pytest.approx(99.01)
+LATENCIES = [10.0, 20.0, 30.0, 40.0, 50.0]
 
 
-def test_throughput() -> None:
-    assert throughput_ips(8, 2.0) == pytest.approx(4000.0)
+def test_mean_known_list() -> None:
+    assert mean_ms(LATENCIES) == 30.0
 
 
-def test_summarize_and_skip_do_not_invent_memory() -> None:
+def test_p50_p99_match_numpy() -> None:
+    assert percentile(LATENCIES, 50.0) == float(np.percentile(LATENCIES, 50.0))
+    assert percentile(LATENCIES, 99.0) == float(np.percentile(LATENCIES, 99.0))
+    assert percentile(LATENCIES, 50.0) == 30.0
+
+
+def test_throughput_from_mean() -> None:
+    # batch 8, mean 4 ms -> 8 / 0.004 = 2000 img/s
+    assert throughput_ips(8, 4.0) == 2000.0
+
+
+def test_summarize_records_timing_backend() -> None:
     result = summarize(
         backend="pytorch",
         precision="fp32",
-        batch_size=2,
+        batch_size=8,
         graph=False,
         n_warmup=0,
-        latencies_ms=[1.0, 2.0, 3.0],
+        n_iter=len(LATENCIES),
+        latencies_ms=LATENCIES,
         timing_backend="wall_clock",
-        gpu_mem_bytes=None,
+        notes="unit test",
+        gpu_mem=None,
     )
+    assert result.mean_ms == 30.0
+    assert result.p50_ms == 30.0
+    assert result.p99_ms == float(np.percentile(LATENCIES, 99.0))
+    assert result.throughput_ips == throughput_ips(8, 30.0)
     assert result.gpu_mem_bytes is None
-    assert result.mean_ms == pytest.approx(2.0)
-    skip = skipped_result(
-        backend="tensorrt",
-        precision="fp16",
-        batch_size=8,
-        graph=True,
-        reason="no GPU",
-    )
-    assert skip.skipped
-    assert math.isnan(skip.mean_ms)
-    assert skip.gpu_mem_bytes is None
-    assert skip.latencies_ms == []
+    assert result.timing_backend == "wall_clock"

@@ -1,4 +1,4 @@
-name: cpu-tests
+name: ci
 
 on:
   push:
@@ -8,10 +8,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # CPU-only CI. Do not call nvidia-smi. Do not request GPU runners.
+      UV_SYSTEM_PYTHON: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - name: Install CPU extras
-        run: uv sync --extra dev --extra torch --extra onnx
-      - name: Test
-        run: uv run pytest
+      - name: Install CPU extras and run tests
+        run: |
+          uv sync --extra dev --extra torch --extra onnx
+          uv run pytest -q
