@@ -53,7 +53,12 @@ class OnnxRuntimeBackend:
         import onnxruntime as ort
         import torch
 
-        onnx_file = export_onnx(cfg)
+        onnx_file = export_onnx(
+            model_name=cfg.model,
+            precision=cfg.precision,
+            batch_size=cfg.batch_size,
+            artifacts_dir=cfg.artifacts_dir,
+        )
         available_eps = set(ort.get_available_providers())
         if cuda_is_available() and "CUDAExecutionProvider" in available_eps:
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]

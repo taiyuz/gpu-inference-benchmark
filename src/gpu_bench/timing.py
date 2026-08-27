@@ -18,6 +18,12 @@ class Timer(Protocol):
     @property
     def backend(self) -> TimingBackend: ...
 
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def notes(self) -> str: ...
+
     def measure(self, fn: Callable[[], Any]) -> float: ...
 
 
@@ -49,6 +55,14 @@ class CudaEventTimer:
             notes="torch.cuda.Event.elapsed_time (GPU-side, ms)",
         )
 
+    @property
+    def name(self) -> str:
+        return self.backend.name
+
+    @property
+    def notes(self) -> str:
+        return self.backend.notes
+
     def measure(self, fn: Callable[[], Any]) -> float:
         torch = self._torch
         torch.cuda.synchronize()
@@ -62,6 +76,9 @@ class CudaEventTimer:
 class WallClockTimer:
     """Host ``perf_counter`` fallback. Not a substitute for CUDA events."""
 
+    def __init__(self) -> None:
+        self._t0: float | None = None
+
     @property
     def backend(self) -> TimingBackend:
         return TimingBackend(
@@ -71,6 +88,22 @@ class WallClockTimer:
                 "Do not treat as GPU kernel time."
             ),
         )
+
+    @property
+    def name(self) -> str:
+        return self.backend.name
+
+    @property
+    def notes(self) -> str:
+        return self.backend.notes
+
+    def start(self) -> None:
+        self._t0 = time.perf_counter()
+
+    def stop(self) -> float:
+        if self._t0 is None:
+            raise RuntimeError("WallClockTimer.stop() called before start()")
+        return (time.perf_counter() - self._t0) * 1000.0
 
     def measure(self, fn: Callable[[], Any]) -> float:
         t0 = time.perf_counter()

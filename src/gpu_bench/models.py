@@ -98,3 +98,15 @@ def random_input(cfg: BenchConfig, device=None, dtype=None, *, pinned: bool | No
     if device.type == "cuda":
         return host.to(device=device, dtype=dtype, non_blocking=True)
     return host.to(device=device)
+
+
+def build_model(model_name: str, device, precision: str, pretrained: bool = False):
+    """Factory used by ONNX export. CPU always loads fp32 weights."""
+    torch, _ = _torch()
+    cfg = BenchConfig(model=model_name, precision="fp32", pretrained=pretrained)
+    if precision != "fp32" and getattr(device, "type", None) == "cuda":
+        cfg.precision = precision
+        dtype = resolve_dtype(precision, device)
+    else:
+        dtype = torch.float32
+    return load_model(cfg, device=device, dtype=dtype)

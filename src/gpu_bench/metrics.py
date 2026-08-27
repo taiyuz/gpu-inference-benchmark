@@ -47,6 +47,18 @@ def throughput_ips(batch_size: int, mean_ms: float) -> float:
     return batch_size / (mean_ms / 1000.0)
 
 
+def mean_ms(latencies_ms: list[float]) -> float:
+    if not latencies_ms:
+        raise ValueError("latencies_ms is empty")
+    return float(np.mean(np.asarray(latencies_ms, dtype=np.float64)))
+
+
+def percentile(latencies_ms: list[float], q: float) -> float:
+    if not latencies_ms:
+        raise ValueError("latencies_ms is empty")
+    return float(np.percentile(np.asarray(latencies_ms, dtype=np.float64), q))
+
+
 def gpu_peak_bytes() -> int | None:
     try:
         import torch
@@ -81,8 +93,13 @@ def summarize(
     notes: str = "",
     gpu_mem_bytes: int | None = None,
     extra: dict[str, Any] | None = None,
+    n_iter: int | None = None,
+    gpu_mem: int | None = None,
 ) -> RunResult:
-    mean_ms, p50_ms, p90_ms, p99_ms = percentiles(latencies_ms)
+    del n_iter  # derived from latencies_ms; accepted for test/call-site compatibility
+    if gpu_mem_bytes is None and gpu_mem is not None:
+        gpu_mem_bytes = gpu_mem
+    mean_val, p50_ms, p90_ms, p99_ms = percentiles(latencies_ms)
     return RunResult(
         backend=backend,
         precision=precision,
@@ -91,11 +108,11 @@ def summarize(
         n_warmup=n_warmup,
         n_iter=len(latencies_ms),
         latencies_ms=list(latencies_ms),
-        mean_ms=mean_ms,
+        mean_ms=mean_val,
         p50_ms=p50_ms,
         p90_ms=p90_ms,
         p99_ms=p99_ms,
-        throughput_ips=throughput_ips(batch_size, mean_ms),
+        throughput_ips=throughput_ips(batch_size, mean_val),
         gpu_mem_bytes=gpu_mem_bytes if gpu_mem_bytes is not None else gpu_peak_bytes(),
         timing_backend=timing_backend,
         notes=notes,
