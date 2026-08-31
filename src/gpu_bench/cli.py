@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 
 from gpu_bench.config import BenchConfig
-from gpu_bench.report import markdown_table, write_json, write_markdown
-from gpu_bench.runner import available_backends, run_suite
+from gpu_bench.report import markdown_table, write_csv, write_json, write_markdown
+from gpu_bench.runner import available_backends, describe_jobs, expand_jobs, run_suite
+from gpu_bench.schema import collect_env
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--suite", choices=("default", "full"), default="default")
     p.add_argument("--out", type=Path, default=None, help="JSON report path")
     p.add_argument("--md", type=Path, default=None, help="Markdown report path")
+    p.add_argument("--csv", type=Path, default=None, help="CSV report path (schema in gpu_bench.schema)")
     p.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"))
     p.add_argument("--require-cuda-events", action="store_true")
     p.add_argument(
@@ -37,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="use the CUDA default stream (graph capture needs a non-default stream)",
     )
     p.add_argument("--list", action="store_true", help="print backend availability and exit")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print jobs and captured env, then exit without running inference",
+    )
     return p
 
 
@@ -50,6 +57,27 @@ def main(argv: list[str] | None = None) -> int:
         for name, (ok, reason) in available_backends().items():
             status = "ready" if ok else f"skip ({reason})"
             print(f"{name:10} {status}")
+        return 0
+
+    if args.dry_run:
+        if args.suite == "full":
+            jobs = expand_jobs(suite="full")
+        else:
+            batches = [int(x) for x in _csv(args.batch)]
+            jobs = [
+                (name, precision, batch, args.graph)
+                for name in _csv(args.backends)
+                for precision in _csv(args.precision)
+                for batch in batches
+            ]
+        env = collect_env()
+        print("dry-run: no inference, no timings")
+        print(
+            f"env hardware={env['hardware']} driver={env['driver']} "
+            f"cuda={env['cuda']} pytorch={env['pytorch']} tensorrt={env['tensorrt']}"
+        )
+        for line in describe_jobs(jobs):
+            print(line)
         return 0
 
     cfg = BenchConfig(
@@ -76,8 +104,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(markdown_table(results))
     if args.out:
-        write_json(args.out, results)
+        write_json(
+            args.out,
+            results,
+            model=cfg.model,
+            include_transfer=cfg.include_transfer,
+        )
         print(f"wrote {args.out}", file=sys.stderr)
+    if args.csv:
+        write_csv(
+            args.csv,
+            results,
+            model=cfg.model,
+            include_transfer=cfg.include_transfer,
+        )
+        print(f"wrote {args.csv}", file=sys.stderr)
     if args.md:
         write_markdown(args.md, results)
         print(f"wrote {args.md}", file=sys.stderr)
