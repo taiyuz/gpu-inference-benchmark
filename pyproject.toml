@@ -10,9 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Taiyu Zhu" }]
+keywords = ["cuda", "tensorrt", "inference", "pytorch", "onnxruntime"]
 dependencies = [
     "numpy>=1.26",
 ]
+
+[project.urls]
+Homepage = "https://github.com/taiyuz/gpu-inference-benchmark"
+Issues = "https://github.com/taiyuz/gpu-inference-benchmark/issues"
 
 [project.optional-dependencies]
 torch = [
