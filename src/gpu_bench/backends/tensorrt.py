@@ -79,7 +79,9 @@ class TensorRTBackend:
                 notes.append("CUDA Graph captured around execute_async_v3")
             except Exception as exc:  # capture can fail on some TRT/runtime combos
                 graph = None
-                notes.append(f"CUDA Graph capture failed ({type(exc).__name__}: {exc}); using enqueue")
+                notes.append(
+                    f"CUDA Graph capture failed ({type(exc).__name__}: {exc}); using enqueue"
+                )
 
         def step() -> None:
             if graph is not None:
@@ -119,7 +121,12 @@ def _load_or_build_engine(cfg: BenchConfig, path: Path):
     if path.exists():
         return runtime.deserialize_cuda_engine(path.read_bytes())
 
-    onnx_file = export_onnx(cfg)
+    onnx_file = export_onnx(
+        model_name=cfg.model,
+        precision=cfg.precision,
+        batch_size=cfg.batch_size,
+        artifacts_dir=cfg.artifacts_dir,
+    )
     builder = trt.Builder(logger)
     network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
     network = builder.create_network(network_flags)
