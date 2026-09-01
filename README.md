@@ -17,18 +17,22 @@ Same ResNet-50, same shapes: **export ONNX → ONNX Runtime → TensorRT 10**. F
 | Latency / throughput in this README | **none** | fill after a real run |
 | `nvidia-smi` | never called | optional, not required by the harness |
 
-CI workflow: `.github/workflows/ci.yml` — `uv sync --extra dev` then `uv run pytest -q` on `ubuntu-latest`. It does **not** install CUDA, TensorRT, or GPU torch. Do not read the green badge as a GPU result.
+CI workflow: `.github/workflows/ci.yml` on `ubuntu-latest` — CPU torch (PyPI CPU index, not CUDA), `ruff check`, `pytest`, then `gpu-bench --list` and `--dry-run --suite full`. It does **not** install CUDA, TensorRT, or GPU wheels, and never calls `nvidia-smi`. Do not read the green badge as a GPU result.
 
 ## How to run
 
-CPU tests — this is what the CI badge runs:
+CPU tests — this is what the CI badge runs (plus CPU torch so the tiny dummy path actually executes):
 
 ```bash
 uv sync --extra dev
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+uv run ruff check src tests
 uv run pytest
+uv run gpu-bench --list
+uv run gpu-bench --dry-run --suite full
 ```
 
-Same machine, still no GPU required (`ruff` is local; CI does not run it):
+Same machine, still no GPU required:
 
 ```bash
 uv run ruff check src tests
@@ -53,7 +57,39 @@ Nsight Systems is optional. CUDA events are the primary timer:
 ./scripts/nsys_profile.sh
 ```
 
-CSV / JSON schema (`gpu_bench.schema.COLUMNS`): hardware, driver, CUDA, backend, model, precision, batch, graphs, timing backend, mean / p50 / p90 / p99, throughput, GPU memory, skipped, notes. Skipped rows leave numeric cells **empty**. They are not estimates.
+CSV / JSON schema (`gpu_bench.schema.COLUMNS`): hardware, driver, CUDA, backend, model, precision, batch, graphs, timing backend, mean / p50 / p90 / p99 / sample stdev, throughput, GPU memory, skipped, notes. Skipped rows leave numeric cells **empty**. They are not estimates. Sample stdev is undefined for n<2 (empty cell / NaN), not a fake 0. p99 with small `n_iter` is flagged in JSON `extra.tail_warning`.
+
+## Filling the GPU table (real NVIDIA only)
+
+The table under **Results** is empty on purpose. GitHub Actions cannot fill it. Only a machine with a visible NVIDIA GPU and CUDA-event timing should.
+
+1. On the GPU box, from a clean checkout:
+
+   ```bash
+   docker build -t gpu-bench:local .
+   ./scripts/run_gpu.sh --suite full --require-cuda-events \
+     --csv artifacts/results.csv --out artifacts/results.json --md artifacts/results.md \
+     --readme-table
+   ```
+
+   Local CUDA env (not CI), same flags:
+
+   ```bash
+   uv sync --extra torch --extra onnx --extra tensorrt --extra cuda --extra dev
+   uv run gpu-bench --suite full --require-cuda-events \
+     --csv artifacts/results.csv --out artifacts/results.json --md artifacts/results.md \
+     --readme-table
+   ```
+
+2. `--require-cuda-events` refuses wall-clock `perf_counter`. If that flag errors, you are not measuring GPU kernel time — **stop**. Do not paste anything into the table.
+
+3. Open `artifacts/results.csv`. Copy **only** rows with `skipped=false`. The cells to paste are `mean_ms`, `p50_ms`, `p99_ms`, `throughput_ips`, and `gpu_mem_bytes` (bytes → MiB). Put `hardware` / `driver` / `cuda` from the same CSV in a caption under the table, not a guessed SKU.
+
+4. Rows with `skipped=true` keep **empty** numeric cells in the CSV and **em-dashes** in the README. They are skip reasons, not estimates. `--readme-table` prints the paste-ready markdown (em-dashes already applied).
+
+5. Leave every unmeasured cell as `—`. Do not backfill from another paper, from CPU timings, from a different batch/precision, or with invented TFLOPS.
+
+Commit the CSV/JSON next to the README edit, or do not claim the numbers.
 
 ## Comparison ladder
 
