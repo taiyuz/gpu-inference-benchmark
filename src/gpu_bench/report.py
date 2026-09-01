@@ -14,6 +14,7 @@ DASH = "—"
 __all__ = [
     "DASH",
     "markdown_table",
+    "readme_results_table",
     "write_csv",
     "write_json",
     "write_markdown",
@@ -58,6 +59,29 @@ def markdown_table(results: list[RunResult]) -> str:
     return header + "\n".join(rows) + "\n"
 
 
+def readme_results_table(results: list[RunResult]) -> str:
+    """README Results column set. Skipped/unmeasured cells are em-dashes, never estimates."""
+    header = (
+        "| Backend | Precision | Batch | Graphs | mean ms | p50 ms | p99 ms | img/s | GPU MiB |\n"
+        "|---|---|---:|:---:|---:|---:|---:|---:|---:|\n"
+    )
+    rows = []
+    for r in results:
+        graphs = "yes" if r.graph else "no"
+        if r.skipped:
+            rows.append(
+                f"| {r.backend} | {r.precision} | {r.batch_size} | {graphs} "
+                f"| {DASH} | {DASH} | {DASH} | {DASH} | {DASH} |"
+            )
+            continue
+        rows.append(
+            f"| {r.backend} | {r.precision} | {r.batch_size} | {graphs} "
+            f"| {_fmt(r.mean_ms)} | {_fmt(r.p50_ms)} | {_fmt(r.p99_ms)} "
+            f"| {_fmt(r.throughput_ips)} | {_mem_mib(r.gpu_mem_bytes)} |"
+        )
+    return header + "\n".join(rows) + "\n"
+
+
 def write_json(
     path: Path,
     results: list[RunResult],
@@ -84,5 +108,9 @@ def write_markdown(path: Path, results: list[RunResult], *, title: str = "gpu-be
         "Unmeasured or skipped rows use `\u2014`. These are not estimates.",
         "",
         markdown_table(results),
+        "",
+        "README-shaped table (paste only after a real NVIDIA run with CUDA events):",
+        "",
+        readme_results_table(results),
     ]
     path.write_text("\n".join(body))

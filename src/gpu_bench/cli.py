@@ -7,7 +7,13 @@ import sys
 from pathlib import Path
 
 from gpu_bench.config import BenchConfig
-from gpu_bench.report import markdown_table, write_csv, write_json, write_markdown
+from gpu_bench.report import (
+    markdown_table,
+    readme_results_table,
+    write_csv,
+    write_json,
+    write_markdown,
+)
 from gpu_bench.runner import available_backends, describe_jobs, expand_jobs, run_suite
 from gpu_bench.schema import collect_env
 
@@ -43,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="print jobs and captured env, then exit without running inference",
+    )
+    p.add_argument(
+        "--readme-table",
+        action="store_true",
+        help="print a README-shaped results table (em-dashes for skipped rows)",
     )
     return p
 
@@ -102,7 +113,10 @@ def main(argv: list[str] | None = None) -> int:
         suite=args.suite,
         base=cfg,
     )
-    print(markdown_table(results))
+    if args.readme_table:
+        print(readme_results_table(results))
+    else:
+        print(markdown_table(results))
     if args.out:
         write_json(
             args.out,

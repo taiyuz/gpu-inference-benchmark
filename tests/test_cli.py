@@ -27,3 +27,11 @@ def test_dry_run_default_prints_jobs(capsys) -> None:
     assert "dry-run" in out
     assert "pytorch fp32 batch=1" in out
     assert "no inference" in out
+
+
+def test_readme_table_flag_on_parser() -> None:
+    from gpu_bench.cli import build_parser
+
+    ns = build_parser().parse_args(["--dry-run", "--readme-table"])
+    assert ns.readme_table is True
+    assert ns.dry_run is True

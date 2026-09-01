@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gpu_bench.report import DASH
+from gpu_bench.metrics import skipped_result, summarize
+from gpu_bench.report import DASH, readme_results_table
 
 ROOT = Path(__file__).resolve().parents[1]
 NUMERIC_CELLS = slice(4, 9)  # mean ms, p50 ms, p99 ms, img/s, GPU MiB
@@ -41,3 +42,37 @@ def test_readme_does_not_claim_gpu_timings() -> None:
     assert "Taiyu Zhu" in text
     assert "template, not a measurement" in text
     assert "--require-cuda-events" in text
+    assert "Filling the GPU table" in text
+
+
+def test_readme_helper_skipped_rows_are_dashes() -> None:
+    skipped = skipped_result(
+        backend="tensorrt",
+        precision="fp16",
+        batch_size=8,
+        graph=True,
+        reason="no CUDA",
+    )
+    table = readme_results_table([skipped])
+    assert "| tensorrt | fp16 | 8 | yes |" in table
+    body = [ln for ln in table.splitlines() if ln.startswith("| tensorrt")]
+    cells = [c.strip() for c in body[0].strip("|").split("|")]
+    for cell in cells[NUMERIC_CELLS]:
+        assert cell == DASH
+
+
+def test_readme_helper_measured_row_uses_provided_samples() -> None:
+    # Synthetic wall-clock samples in a unit test — not a GPU measurement.
+    result = summarize(
+        backend="pytorch",
+        precision="fp32",
+        batch_size=1,
+        graph=False,
+        n_warmup=0,
+        latencies_ms=[10.0, 20.0, 30.0, 40.0, 50.0],
+        timing_backend="wall_clock",
+        gpu_mem=None,
+    )
+    table = readme_results_table([result])
+    assert "30.000" in table  # mean of the fixture list
+    assert "wall_clock" not in table  # README-shaped table has no timing column
