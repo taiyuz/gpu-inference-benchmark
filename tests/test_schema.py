@@ -45,10 +45,12 @@ def test_schema_has_recruiter_columns() -> None:
         "precision",
         "p50_ms",
         "p99_ms",
+        "stdev_ms",
         "notes",
     }
     assert required.issubset(set(COLUMNS))
     assert COLUMNS[0] == "timestamp"
+    assert COLUMNS.index("stdev_ms") == COLUMNS.index("p99_ms") + 1
 
 
 def test_collect_env_cpu_safe_no_nvidia_smi() -> None:
@@ -68,6 +70,7 @@ def test_measured_row_has_p50_p99() -> None:
     assert row["precision"] == "fp32"
     assert row["p50_ms"]
     assert row["p99_ms"]
+    assert row["stdev_ms"]
     assert row["skipped"] == "false"
     assert float(row["p50_ms"]) == 30.0
     assert row["notes"] == "unit test"
@@ -87,6 +90,7 @@ def test_skipped_row_does_not_invent_latency() -> None:
     assert row["mean_ms"] == ""
     assert row["p50_ms"] == ""
     assert row["p99_ms"] == ""
+    assert row["stdev_ms"] == ""
     assert row["throughput_ips"] == ""
     assert row["gpu_mem_bytes"] == ""
     assert "no CUDA" in row["notes"]
@@ -109,7 +113,9 @@ def test_write_csv_roundtrip(tmp_path: Path) -> None:
         got = list(reader)
     assert len(got) == 2
     assert got[0]["p50_ms"]
+    assert got[0]["stdev_ms"]
     assert got[1]["p50_ms"] == ""
+    assert got[1]["stdev_ms"] == ""
     assert got[1]["skipped"] == "true"
 
 
@@ -120,3 +126,4 @@ def test_json_payload_keeps_results_and_rows() -> None:
     assert "Do not backfill" in payload["disclaimer"]
     dumped = json.dumps(payload, default=str)
     assert "30" in dumped
+    assert "stdev_ms" in payload["schema"]
