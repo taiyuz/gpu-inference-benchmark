@@ -18,3 +18,12 @@ def test_dry_run_full_suite_prints_jobs(capsys) -> None:
     assert "onnx" in out
     assert "tensorrt" in out
     assert "graph=True" in out
+
+
+def test_dry_run_default_prints_jobs(capsys) -> None:
+    rc = main(["--dry-run", "--backends", "pytorch", "--precision", "fp32", "--batch", "1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "pytorch fp32 batch=1" in out
+    assert "no inference" in out

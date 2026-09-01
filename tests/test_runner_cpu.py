@@ -88,3 +88,31 @@ def test_full_suite_includes_bf16_and_graphs() -> None:
     assert any(g and b == 1 for *_, b, g in jobs)
     assert any(g and b == 8 for *_, b, g in jobs)
     assert {b for _, _, b, _ in jobs} >= {1, 8, 16, 32}
+
+
+def test_full_suite_cpu_never_invents_gpu_numbers(tiny_cpu_cfg: BenchConfig) -> None:
+    pytest.importorskip("torch")
+    import math
+
+    import torch
+
+    if torch.cuda.is_available():
+        pytest.skip("CPU dummy path")
+    tiny_cpu_cfg.warmup = 0
+    tiny_cpu_cfg.iters = 2
+    results = run_suite(suite="full", base=tiny_cpu_cfg)
+    assert results
+    for result in results:
+        if result.skipped:
+            assert math.isnan(result.mean_ms)
+            assert math.isnan(result.stdev_ms)
+            assert result.latencies_ms == []
+            assert result.timing_backend == "none"
+            continue
+        # Only PyTorch FP32 eager can measure on CPU, and only as wall-clock.
+        assert result.backend == "pytorch"
+        assert result.precision == "fp32"
+        assert result.graph is False
+        assert result.timing_backend == "wall_clock"
+        assert result.mean_ms > 0
+        assert result.gpu_mem_bytes is None

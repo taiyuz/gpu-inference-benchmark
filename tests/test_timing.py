@@ -28,7 +28,7 @@ def test_make_timer_cpu_is_wall_clock() -> None:
         cuda = False
     if cuda:
         timer = make_timer()
-        assert timer.name == "cuda_events"
+        assert timer.name == "cuda_event"
         return
     timer = make_timer(require_cuda_events=False)
     assert timer.name == "wall_clock"
@@ -52,3 +52,16 @@ def test_stop_before_start_raises() -> None:
     timer = WallClockTimer()
     with pytest.raises(RuntimeError):
         timer.stop()
+
+
+def test_require_cuda_events_refuses_cpu() -> None:
+    try:
+        import torch
+
+        cuda = torch.cuda.is_available()
+    except ImportError:
+        cuda = False
+    if cuda:
+        pytest.skip("CUDA present")
+    with pytest.raises(RuntimeError, match="CUDA events required"):
+        make_timer(require_cuda_events=True)

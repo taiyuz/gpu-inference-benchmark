@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # CPU-only CI. Do not call nvidia-smi. Do not request GPU runners.
       UV_SYSTEM_PYTHON: "0"
@@ -16,8 +17,13 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
-      - name: Install CPU-only deps and run tests
+      - name: Install CPU-only deps, lint, test, dry-run
         run: |
           uv python install 3.12
           uv sync --extra dev
-          uv run pytest -q
+          # CPU torch so the tiny dummy path runs. Never CUDA/TRT wheels.
+          uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          uv run ruff check src tests
+          uv run pytest -q --tb=short
+          uv run gpu-bench --list
+          uv run gpu-bench --dry-run --suite full
