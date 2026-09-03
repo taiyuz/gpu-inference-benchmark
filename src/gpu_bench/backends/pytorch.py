@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 
 from gpu_bench.config import BenchConfig
+from gpu_bench.harness import warmup_then_measure
 from gpu_bench.metrics import RunResult, reset_gpu_peak, skipped_result, summarize
 from gpu_bench.models import load_model, random_input, resolve_device, resolve_dtype
 from gpu_bench.timing import make_timer
@@ -117,19 +118,22 @@ class PyTorchBackend:
             if cfg.include_transfer and device.type == "cuda" and last["y"] is not None:
                 _ = last["y"].cpu()
 
-        for _ in range(cfg.warmup):
-            step()
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-
-        latencies = [timer.measure(step) for _ in range(cfg.iters)]
+        sync_fn = torch.cuda.synchronize if device.type == "cuda" else None
+        loop = warmup_then_measure(
+            step,
+            timer,
+            warmup=cfg.warmup,
+            iters=cfg.iters,
+            sync_fn=sync_fn,
+        )
         return summarize(
             backend=self.name,
             precision=cfg.precision,
             batch_size=cfg.batch_size,
             graph=cfg.graph,
-            n_warmup=cfg.warmup,
-            latencies_ms=latencies,
-            timing_backend=timer.backend.name,
-            notes="; ".join(notes + [timer.backend.notes]),
+            n_warmup=loop.n_warmup,
+            latencies_ms=loop.latencies_ms,
+            timing_backend=loop.timing_backend,
+            notes="; ".join(notes + list(loop.notes) + [timer.backend.notes]),
+            extra=dict(loop.extra),
         )
