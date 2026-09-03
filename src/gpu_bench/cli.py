@@ -82,11 +82,17 @@ def main(argv: list[str] | None = None) -> int:
                 for batch in batches
             ]
         env = collect_env()
-        print("dry-run: no inference, no timings")
+        print(
+            "dry-run: no inference, no timings "
+            f"(warmup={args.warmup} discarded, iters={args.iters} timed)"
+        )
         print(
             f"env hardware={env['hardware']} driver={env['driver']} "
             f"cuda={env['cuda']} pytorch={env['pytorch']} tensorrt={env['tensorrt']}"
         )
+        batches_seen = sorted({b for _, _, b, _ in jobs})
+        if len(batches_seen) > 1:
+            print(f"batch-sweep: {','.join(str(b) for b in batches_seen)}")
         for line in describe_jobs(jobs):
             print(line)
         return 0
