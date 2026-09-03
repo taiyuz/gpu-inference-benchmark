@@ -7,6 +7,7 @@ import inspect
 
 def test_timer_metrics_export_and_model_factory_import() -> None:
     from gpu_bench.export import export_onnx
+    from gpu_bench.harness import warmup_then_measure
     from gpu_bench.metrics import mean_ms, percentile, summarize
     from gpu_bench.models import build_model
     from gpu_bench.timing import WallClockTimer
@@ -16,6 +17,7 @@ def test_timer_metrics_export_and_model_factory_import() -> None:
     assert callable(percentile)
     assert callable(summarize)
     assert callable(export_onnx)
+    assert callable(warmup_then_measure)
     timer = WallClockTimer()
     assert timer.name == "wall_clock"
     assert "NOT a CUDA event" in timer.notes
