@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from gpu_bench.config import BenchConfig
 from gpu_bench.export import export_onnx
+from gpu_bench.harness import warmup_then_measure
 from gpu_bench.metrics import RunResult, reset_gpu_peak, skipped_result, summarize
 from gpu_bench.timing import cuda_is_available, make_timer
 
@@ -117,19 +118,22 @@ class OnnxRuntimeBackend:
             def step() -> None:
                 sess.run([output_name], feed)
 
-        for _ in range(cfg.warmup):
-            step()
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-
-        latencies = [timer.measure(step) for _ in range(cfg.iters)]
+        sync_fn = torch.cuda.synchronize if device.type == "cuda" else None
+        loop = warmup_then_measure(
+            step,
+            timer,
+            warmup=cfg.warmup,
+            iters=cfg.iters,
+            sync_fn=sync_fn,
+        )
         return summarize(
             backend=self.name,
             precision=cfg.precision,
             batch_size=cfg.batch_size,
             graph=False,
-            n_warmup=cfg.warmup,
-            latencies_ms=latencies,
-            timing_backend=timer.backend.name,
-            notes="; ".join(notes + [timer.backend.notes]),
+            n_warmup=loop.n_warmup,
+            latencies_ms=loop.latencies_ms,
+            timing_backend=loop.timing_backend,
+            notes="; ".join(notes + list(loop.notes) + [timer.backend.notes]),
+            extra=dict(loop.extra),
         )
